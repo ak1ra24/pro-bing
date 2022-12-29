@@ -40,7 +40,7 @@ func main() {
 	timeout := flag.Duration("t", time.Second*100000, "")
 	interval := flag.Duration("i", time.Second, "")
 	count := flag.Int("c", -1, "")
-	size := flag.Int("s", 24, "")
+	size := flag.Int("s", 28, "")
 	ttl := flag.Int("l", 64, "TTL")
 	privileged := flag.Bool("privileged", false, "")
 	flag.Usage = func() {
@@ -51,6 +51,10 @@ func main() {
 	if flag.NArg() == 0 {
 		flag.Usage()
 		return
+	}
+
+	if *size < 28 {
+		fmt.Println("Please specify with size 28 or larger")
 	}
 
 	host := flag.Arg(0)
@@ -70,8 +74,15 @@ func main() {
 	}()
 
 	pinger.OnRecv = func(pkt *probing.Packet) {
-		fmt.Printf("%d bytes from %s: icmp_seq=%d time=%v ttl=%v\n",
-			pkt.Nbytes, pkt.IPAddr, pkt.Seq, pkt.Rtt, pkt.TTL)
+		if pkt.Loss {
+			fmt.Printf("%d bytes from %s: icmp_seq=%d %v\n",
+				pkt.Nbytes, pkt.IPAddr, pkt.Seq, pkt.LossReason)
+		} else {
+			fmt.Printf("%d bytes from %s: icmp_seq=%d time=%v ttl=%v\n",
+				pkt.Nbytes, pkt.IPAddr, pkt.Seq, pkt.Rtt, pkt.TTL)
+		}
+		// fmt.Printf("%d bytes from %s: icmp_seq=%d time=%v ttl=%v\n",
+		// 	pkt.Nbytes, pkt.IPAddr, pkt.Seq, pkt.Rtt, pkt.TTL)
 	}
 	pinger.OnDuplicateRecv = func(pkt *probing.Packet) {
 		fmt.Printf("%d bytes from %s: icmp_seq=%d time=%v ttl=%v (DUP!)\n",
