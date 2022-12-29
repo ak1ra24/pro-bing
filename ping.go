@@ -53,6 +53,7 @@ package probing
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log"
@@ -235,6 +236,13 @@ type Packet struct {
 
 	// ID is the ICMP identifier.
 	ID int
+
+	// Loss is the packet lost
+	// if true is loss
+	Loss bool
+
+	// LossReason is the packet lost reason
+	LossReason string
 }
 
 // Statistics represent the stats of a currently running or finished
@@ -279,28 +287,31 @@ func (p *Pinger) updateStatistics(pkt *Packet) {
 	p.statsMu.Lock()
 	defer p.statsMu.Unlock()
 
-	p.PacketsRecv++
-	if p.RecordRtts {
-		p.rtts = append(p.rtts, pkt.Rtt)
+	if !pkt.Loss {
+		p.PacketsRecv++
+		if p.RecordRtts {
+			p.rtts = append(p.rtts, pkt.Rtt)
+		}
+
+		if p.PacketsRecv == 1 || pkt.Rtt < p.minRtt {
+			p.minRtt = pkt.Rtt
+		}
+
+		if pkt.Rtt > p.maxRtt {
+			p.maxRtt = pkt.Rtt
+		}
+
+		pktCount := time.Duration(p.PacketsRecv)
+		// welford's online method for stddev
+		// https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm
+		delta := pkt.Rtt - p.avgRtt
+		p.avgRtt += delta / pktCount
+		delta2 := pkt.Rtt - p.avgRtt
+		p.stddevm2 += delta * delta2
+
+		p.stdDevRtt = time.Duration(math.Sqrt(float64(p.stddevm2 / pktCount)))
+
 	}
-
-	if p.PacketsRecv == 1 || pkt.Rtt < p.minRtt {
-		p.minRtt = pkt.Rtt
-	}
-
-	if pkt.Rtt > p.maxRtt {
-		p.maxRtt = pkt.Rtt
-	}
-
-	pktCount := time.Duration(p.PacketsRecv)
-	// welford's online method for stddev
-	// https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm
-	delta := pkt.Rtt - p.avgRtt
-	p.avgRtt += delta / pktCount
-	delta2 := pkt.Rtt - p.avgRtt
-	p.stddevm2 += delta * delta2
-
-	p.stdDevRtt = time.Duration(math.Sqrt(float64(p.stddevm2 / pktCount)))
 }
 
 // SetIPAddr sets the ip address of the target host.
@@ -657,17 +668,20 @@ func (p *Pinger) processPacket(recv *packet) error {
 		return fmt.Errorf("error parsing icmp message: %w", err)
 	}
 
-	if m.Type != ipv4.ICMPTypeEchoReply && m.Type != ipv6.ICMPTypeEchoReply {
+	// if m.Type != ipv4.ICMPTypeEchoReply && m.Type != ipv6.ICMPTypeEchoReply {
+	if m.Type == ipv4.ICMPTypeEcho || m.Type == ipv6.ICMPTypeEchoRequest {
 		// Not an echo reply, ignore it
 		return nil
 	}
 
 	inPkt := &Packet{
-		Nbytes: recv.nbytes,
-		IPAddr: recv.addr,
-		Addr:   recv.addr.String(),
-		TTL:    recv.ttl,
-		ID:     p.id,
+		Nbytes:     recv.nbytes,
+		IPAddr:     recv.addr,
+		Addr:       recv.addr.String(),
+		TTL:        recv.ttl,
+		ID:         p.id,
+		Loss:       false,
+		LossReason: "",
 	}
 
 	switch pkt := m.Body.(type) {
@@ -699,6 +713,21 @@ func (p *Pinger) processPacket(recv *packet) error {
 		}
 		// remove it from the list of sequences we're waiting for so we don't get duplicates.
 		delete(p.awaitingSequences[*pktUUID], pkt.Seq)
+		p.updateStatistics(inPkt)
+	case *icmp.TimeExceeded:
+		inPkt.Loss = true
+		inPkt.LossReason = "Time Exceeded"
+		inPkt.ID, inPkt.Seq, inPkt.Addr = parseICMPError(proto, m.Body.(*icmp.TimeExceeded).Data)
+		p.updateStatistics(inPkt)
+	case *icmp.PacketTooBig:
+		inPkt.Loss = true
+		inPkt.LossReason = "Packet Too Big"
+		inPkt.ID, inPkt.Seq, inPkt.Addr = parseICMPError(proto, m.Body.(*icmp.PacketTooBig).Data)
+		p.updateStatistics(inPkt)
+	case *icmp.DstUnreach:
+		inPkt.Loss = true
+		inPkt.LossReason = "Destination Unreachable"
+		inPkt.ID, inPkt.Seq, inPkt.Addr = parseICMPError(proto, m.Body.(*icmp.DstUnreach).Data)
 		p.updateStatistics(inPkt)
 	default:
 		// Very bad, not sure how this can happen
@@ -831,4 +860,23 @@ var seed = time.Now().UnixNano()
 // getSeed returns a goroutine-safe unique seed
 func getSeed() int64 {
 	return atomic.AddInt64(&seed, 1)
+}
+
+func parseICMPError(proto int, data []byte) (int, int, string) {
+	IPheader, err := ipv4.ParseHeader(data[:len(data)-8])
+	if err != nil {
+		fmt.Println("Failed to parse packet ipv4 header:", err)
+	}
+	ICMPHdr := data[IPheader.Len:]
+	var ID, Seq uint16
+	err = binary.Read(bytes.NewReader(ICMPHdr[6:8]), binary.BigEndian, &Seq)
+	if err != nil {
+		fmt.Println("parseICMPError", "Failed to parse packet header Sequence:", err)
+	}
+	err = binary.Read(bytes.NewReader(ICMPHdr[4:6]), binary.BigEndian, &ID)
+	if err != nil {
+		fmt.Println("parseICMPError", "Failed to parse packet header ID:", err)
+	}
+	// pp.Println(ID, Seq)
+	return int(ID), int(Seq), IPheader.Dst.String()
 }
