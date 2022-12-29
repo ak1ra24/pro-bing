@@ -211,6 +211,7 @@ type packet struct {
 	bytes  []byte
 	nbytes int
 	ttl    int
+	addr   *net.IPAddr
 }
 
 // Packet represents a received and processed ICMP echo packet.
@@ -596,7 +597,8 @@ func (p *Pinger) recvICMP(
 			}
 			var n, ttl int
 			var err error
-			n, ttl, _, err = conn.ReadFrom(bytes)
+			var addr net.Addr
+			n, ttl, addr, err = conn.ReadFrom(bytes)
 			if err != nil {
 				if neterr, ok := err.(*net.OpError); ok {
 					if neterr.Timeout() {
@@ -608,10 +610,23 @@ func (p *Pinger) recvICMP(
 				return err
 			}
 
+			// Make sure to use the received address from the packet as for multicast
+			// the response might come from other IP addresses
+			ipaddr, ok := addr.(*net.IPAddr)
+			if !ok {
+				udpaddr, ok := addr.(*net.UDPAddr)
+				if !ok {
+					// Should never occur
+					return fmt.Errorf("error parsing the address")
+				}
+
+				ipaddr = &net.IPAddr{IP: udpaddr.IP}
+			}
+
 			select {
 			case <-p.done:
 				return nil
-			case recv <- &packet{bytes: bytes, nbytes: n, ttl: ttl}:
+			case recv <- &packet{bytes: bytes, nbytes: n, ttl: ttl, addr: ipaddr}:
 			}
 		}
 	}
@@ -661,8 +676,8 @@ func (p *Pinger) processPacket(recv *packet) error {
 
 	inPkt := &Packet{
 		Nbytes:     recv.nbytes,
-		IPAddr:     p.ipaddr,
-		Addr:       p.addr,
+		IPAddr:     recv.addr,
+		Addr:       recv.addr.String(),
 		TTL:        recv.ttl,
 		ID:         p.id,
 		Loss:       false,
