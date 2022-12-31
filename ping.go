@@ -225,6 +225,8 @@ type Packet struct {
 	// Addr is the string address of the host being pinged.
 	Addr string
 
+	Target string
+
 	// NBytes is the number of bytes in the message.
 	Nbytes int
 
@@ -678,6 +680,7 @@ func (p *Pinger) processPacket(recv *packet) error {
 		Nbytes:     recv.nbytes,
 		IPAddr:     recv.addr,
 		Addr:       recv.addr.String(),
+		Target:     p.addr,
 		TTL:        recv.ttl,
 		ID:         p.id,
 		Loss:       false,
@@ -790,6 +793,7 @@ func (p *Pinger) sendICMP(conn packetConn) error {
 				Nbytes: len(msgBytes),
 				IPAddr: p.ipaddr,
 				Addr:   p.addr,
+				Target: p.addr,
 				Seq:    p.sequence,
 				ID:     p.id,
 			}
